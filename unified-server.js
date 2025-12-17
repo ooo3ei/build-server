@@ -413,7 +413,6 @@ class BrowserManager {
       await this.page.getByRole('button', { name: 'Preview' }).click();
       this.logger.info('[浏览器] 已切换到预览视图。浏览器端初始化完成。');
 
-
       this.currentAuthIndex = authIndex;
       this.logger.info('==================================================');
       this.logger.info(`✅ [浏览器] 账号 ${authIndex} 初始化成功！`);
@@ -790,6 +789,107 @@ class RequestHandler {
         this.logger.debug(`[请求预处理] 服务器API密钥认证已禁用。检测到并移除了来自客户端的 'key' 查询参数 (值为: '${req.query.key}')。`);
       }
       delete req.query.key;
+    }
+
+    // 新增：查找并点击 Launch 按钮或 rocket_launch 图标
+    this.logger.info('[浏览器] 开始查找 Launch 按钮或 rocket_launch 图标...');
+    const maxAttempts = 10;
+    let attemptCount = 0;
+    const currentPage = this.browserManager.page; // 保存当前页面引用供闭包使用
+    
+    while (attemptCount < maxAttempts) {
+      attemptCount++;
+      
+      // --- 核心查找逻辑 (纯 JS 瞬时查找) ---
+      const targetInfo = await currentPage.evaluate(() => {
+        // 优先查找 rocket_launch 图标或 Launch 文本
+        const candidates = Array.from(
+          document.querySelectorAll(
+            'button, span, div[role="button"], a, mat-icon'
+          )
+        );
+
+        for (const el of candidates) {
+          const text = el.innerText || "";
+          // 匹配 rocket_launch (图标名) 或 Launch (文本)
+          if (!/Launch|rocket_launch/i.test(text)) continue;
+
+          const rect = el.getBoundingClientRect();
+          // 必须可见且在安全区 (Y: 400-900, 放宽一点范围)
+          if (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            rect.top > 300 &&
+            rect.top < 700
+          ) {
+            return {
+              found: true,
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2,
+              text: text.substring(0, 15),
+            };
+          }
+        }
+        return { found: false };
+      });
+
+      // --- 新增的命中处理逻辑 ---
+      if (targetInfo.found) {
+        this.logger.info(
+          `[Browser] 🎯 (第${attemptCount}次扫描) 锁定目标 "${
+            targetInfo.text
+          }" @ ${Math.round(targetInfo.x)},${Math.round(targetInfo.y)}`
+        );
+
+        // === 改进后的点击流程 ===
+
+        // 1. 标准鼠标点击 (模拟真人稍微一点点延迟，而不是长按)
+        try {
+          await currentPage.mouse.move(targetInfo.x, targetInfo.y);
+          await new Promise((r) => setTimeout(r, 100)); // 悬停一小会儿
+          await currentPage.mouse.click(targetInfo.x, targetInfo.y, {
+            delay: 50,
+          }); // 按下抬起间隔50ms
+        } catch (err) {
+          this.logger.warn(`[Browser] 鼠标点击失败: ${err.message}`);
+        }
+
+        // 2. 智能等待验证 (最多等 1.5 秒，每 250ms 检查一次)
+        let clickedSuccess = false;
+        for (let k = 0; k < 6; k++) {
+          await new Promise((r) => setTimeout(r, 250));
+
+          const stillExists = await currentPage.evaluate(() => {
+            const els = Array.from(
+              document.querySelectorAll("button, span, mat-icon")
+            );
+            return els.some(
+              (el) =>
+                /Launch|rocket_launch/i.test(el.innerText) &&
+                el.getBoundingClientRect().top > 300
+            );
+          });
+
+          if (!stillExists) {
+            clickedSuccess = true;
+            break;
+          }
+        }
+
+        if (clickedSuccess) {
+          this.logger.info(`[Browser] ✅ 唤醒成功！按钮已消失。`);
+          break; // 成功退出
+        }
+      }
+
+      if (!targetInfo.found) {
+        this.logger.info(`[浏览器] 尝试 ${attemptCount}/${maxAttempts} 未找到目标元素，等待 1 秒后重试...`);
+        await currentPage.waitForTimeout(1000);
+      }
+    }
+
+    if (attemptCount >= maxAttempts) {
+      this.logger.warn('[浏览器] 达到最大尝试次数，未找到 Launch 按钮或 rocket_launch 图标');
     }
 
     // 提前获取模型名称和当前账号
